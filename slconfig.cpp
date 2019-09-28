@@ -254,6 +254,7 @@ void changeFieldValue (HANDLE portHandle, const int fieldIndex, Data& data, char
     }
 
     buildSendSentence (portHandle, sentence);
+    Sleep (300);
 }
 
 void showStatus (Data& data, char *valueNames [])
