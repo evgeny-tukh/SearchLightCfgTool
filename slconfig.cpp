@@ -124,7 +124,6 @@ void buildSendSentence (HANDLE portHandle, const char *body)
         sprintf (sentence + (i + 1), "%02X\n", crc);
 
     WriteFile (portHandle, sentence, strlen (sentence), & bytesWritten, 0);
-printf("Out: %s",sentence);
 }
 
 void sendRequest (HANDLE portHandle)
@@ -312,13 +311,11 @@ int main (int argCount, char *args [])
                     waitForResponse (portHandle, buffer, sizeof (buffer));
 
                     fieldCount = 0;
-printf ("Parsing %s\n",buffer);
+
                     parse (buffer, fields, fieldCount);
 
                     for (int i = 0; i < MAX; ++ i)
-{printf("Field %d: %s\n",i+1,fields [i+1]);
                         data.values [i] = atoi  (fields [i+1]);
-}
 
                     Sleep (100);
                 }
