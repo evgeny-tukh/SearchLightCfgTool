@@ -9,6 +9,8 @@
 #define ASCII_XON       0x11
 #define ASCII_XOFF      0x13
 
+#define SLC_SIGNATURE   "SLC"
+
 enum DataType
 {
     GPS_FROM_PORT_OFFSET  = 0,
@@ -18,6 +20,7 @@ enum DataType
     LAMP_HEIGHT,
     LENGTH_OVERALL,
     BREADTH,
+    BEARING_CORRECTION,
 
     MAX
 };
@@ -26,11 +29,13 @@ union Data
 {
     struct
     {
-        int gpsPortOffset, gpsSternOffset, lampPortOffset, lampBowOffset, lampHeight, lengthOverall, breadth;
+        int gpsPortOffset, gpsSternOffset, lampPortOffset, lampBowOffset, lampHeight, lengthOverall, breadth, brgCorrection;
     };
 
     int values [MAX];
 };
+
+extern "C" void *__enclave_config = 0;
 
 void showHelp ()
 {
@@ -128,7 +133,7 @@ void buildSendSentence (HANDLE portHandle, const char *body)
 
 void sendRequest (HANDLE portHandle)
 {
-    buildSendSentence (portHandle, "$PSMCFG,,,,,,,,");
+    buildSendSentence (portHandle, "$PSMCFG,,,,,,,,,");
 }
 
 bool isIncomingDataAvailable (HANDLE portHandle)
@@ -212,7 +217,7 @@ char getCommand ()
 
         command = toupper (getchar ());
 
-        acceptableChar = strchr ("DQ1234567", command);
+        acceptableChar = strchr ("BRDQ12345678", command);
         crlf           = command == '\r' || command == '\n';
 
         if (!acceptableChar && !crlf)
@@ -236,7 +241,10 @@ void changeFieldValue (HANDLE portHandle, const int fieldIndex, Data& data, char
         printf ("Not a number - ignored\n"); return;
     }
 
-    newValue = atoi (valueString);
+    if (fieldIndex == DataType::BEARING_CORRECTION)
+        newValue = (int) (atof (valueString) * 10.0 + 0.1);
+    else
+        newValue = atoi (valueString);
 
     strcpy (sentence, "$PSMCFG");
 
@@ -266,11 +274,116 @@ void showStatus (Data& data, char *valueNames [])
             "5 - %s\t\t\t[%d]\n"
             "6 - %s\t\t[%d]\n"
             "7 - %s\t\t[%d]\n"
+            "8 - %s\t\t[%.1f]\n"
             "D - Display status\n"
+            "B - Backup\n"
+            "R - Restore\n"
             "Q - Quit\n\n",
             valueNames [0], data.gpsPortOffset, valueNames [1], data.gpsSternOffset, valueNames [2], data.lampPortOffset,
             valueNames [3], data.lampBowOffset, valueNames [4], data.lampHeight, valueNames [5],
-            data.lengthOverall, valueNames [6], data.breadth);
+            data.lengthOverall, valueNames [6], data.breadth, valueNames [7], (double) data.brgCorrection * 0.1);
+}
+
+bool getBackupFileName (char *filePath)
+{
+    printf ("Enter backup file name [%s]: ", filePath);
+    scanf ("%s", filePath);
+
+    return strlen (filePath) > 0;
+}
+
+void backup (Data& data)
+{
+    char filePath [100] = { "slconfig.dat" };
+
+    if (getBackupFileName (filePath))
+    {
+        HANDLE backupFile = CreateFile (filePath, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
+
+        if (backupFile != INVALID_HANDLE_VALUE)
+        {
+            unsigned long  bytesWritten;
+            unsigned short size = sizeof (data);
+
+            WriteFile (backupFile, SLC_SIGNATURE, 3, & bytesWritten, 0);
+            WriteFile (backupFile, & size, sizeof (size), & bytesWritten, 0);
+            WriteFile (backupFile, & data, sizeof (data), & bytesWritten, 0);
+            CloseHandle (backupFile);
+
+            printf ("Configuration has been backed up to %s\n\n", filePath);
+        }
+        else
+        {
+            printf ("Unable to write to file '%s', error code %d\n\n", filePath, GetLastError ());
+        }
+    }
+}
+
+void restore (HANDLE portHandle, Data& data)
+{
+    char filePath [100] = { "slconfig.dat" };
+
+    if (getBackupFileName (filePath))
+    {
+        HANDLE backupFile = CreateFile (filePath, GENERIC_READ, 0, 0, OPEN_EXISTING, 0, 0);
+
+        if (backupFile != INVALID_HANDLE_VALUE)
+        {
+            unsigned long  bytesRead;
+            unsigned short size;
+            char           signature [3], sentence [100], field [20], input;
+
+            ReadFile (backupFile, signature, sizeof (signature), & bytesRead, 0);
+
+            if (memcmp (signature, SLC_SIGNATURE, 3) != 0)
+            {
+                printf ("It is not SearchLight backup file.\n\n"); return;
+            }
+
+            ReadFile (backupFile, & size, sizeof (size), & bytesRead, 0);
+
+            printf ("Reading %d bytes...\n", size);
+            ReadFile (backupFile, & data, size, & bytesRead, 0);
+            CloseHandle (backupFile);
+
+            printf ("Confirm to upload (y/n) ");
+
+            do
+            {
+                scanf ("%c", & input);
+
+                input = tolower (input);
+
+                if (input != '\n' && input != '\r')
+                    printf ("Confirm to upload (y/n) ");
+            }
+            while (input != 'y' && input != 'n');
+
+            printf ("\n");
+
+            if (input == 'y')
+            {
+                printf ("Uploading...\n");
+
+                strcpy (sentence, "$PSMCFG");
+
+                for (int i = 0; i < MAX; ++ i)
+                {
+                    strcat (sentence, ",");
+                    sprintf (field, "%d", data.values [i]);
+                    strcat (sentence, field);
+                }
+
+                buildSendSentence (portHandle, sentence);
+                Sleep (300);
+                printf ("Configuration has been restored from %s\n\n", filePath);
+            }
+        }
+        else
+        {
+            printf ("Unable to read from file '%s', error code %d\n\n", filePath, GetLastError ());
+        }
+    }
 }
 
 int main (int argCount, char *args [])
@@ -280,7 +393,7 @@ int main (int argCount, char *args [])
     int    baud = 4800;
     Data   data;
     char  *valueNames  [] = { "GPS offset from port side", "GPS offset from stern", "Lamp offset from port side", "Lamp offset from bow",
-                              "Lamp height", "Ship length overall", "Ship breadth" };
+                              "Lamp height", "Ship length overall", "Ship breadth", "Bearing correction" };
 
     printf ("SeaMaster SearcLight configuration tool\n");
 
@@ -326,8 +439,12 @@ int main (int argCount, char *args [])
 
                 command = getCommand ();
 
-                if (command >= '1' && command < '8')
+                if (command >= '1' && command <= '8')
                     changeFieldValue (portHandle, command - '1', data, valueNames);
+                else if (command == 'B')
+                    backup (data);
+                else if (command == 'R')
+                    restore (portHandle, data);
             }
             while (command != 'Q');
 
